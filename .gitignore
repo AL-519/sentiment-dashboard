@@ -1,0 +1,23 @@
+# =========================
+# NEXT.JS / FRONTEND
+# =========================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# =========================
+# PYTHON / BACKEND
+# =========================
+backend/venv/
+backend/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# =========================
+# OS & ENVIRONMENT
+# =========================
+.env
+.DS_Store
+Thumbs.db
