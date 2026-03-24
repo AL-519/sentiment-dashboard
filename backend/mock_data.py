@@ -1,37 +1,58 @@
 import random
-from datetime import datetime, timedelta, timezone
-
-# Simple arrays to generate realistic names
-FIRST_NAMES = ["Emma", "Liam", "Olivia", "Noah", "Ava",
-               "William", "Sophia", "James", "Isabella", "Oliver"]
-LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones",
-              "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
+from datetime import datetime, timedelta
 
 
-def generate_user_session():
-    """Generates a realistic user session document."""
-    first = random.choice(FIRST_NAMES)
-    last = random.choice(LAST_NAMES)
-    age = random.randint(18, 65)
+def generate_bulk_users(count=250):
+    users = []
+    now = datetime.utcnow()
+    five_years_ago = now - timedelta(days=5*365)
 
-    # Simulate a login time that happened sometime today
-    now = datetime.now(timezone.utc)
-    login_time = now - timedelta(minutes=random.randint(10, 1440))
+    for i in range(count):
+        # 1. Account Metadata
+        # Random account creation date within last 5 years
+        created_at = five_years_ago + timedelta(
+            seconds=random.randint(
+                0, int((now - five_years_ago).total_seconds()))
+        )
 
-    # Simulate how long they were logged in (10 minutes to 8 hours)
-    duration_minutes = random.randint(10, 480)
-    logout_time = login_time + timedelta(minutes=duration_minutes)
+        age = random.randint(10, 90)
+        location = random.choice(
+            ["New York", "London", "Tokyo", "Berlin", "Mumbai", "Sydney"])
+        device = random.choice(["Mobile", "Desktop", "Tablet"])
 
-    # Calculate hours to 2 decimal places
-    hours_logged_in = round(duration_minutes / 60, 2)
+        # 2. Generate Activities
+        activities = []
+        total_time = 0.0
+        # Each user has between 1 and 10 login sessions
+        num_sessions = random.randint(1, 10)
 
-    return {
-        "user_id": f"u_{random.randint(1000, 9999)}",
-        "name": f"{first} {last}",
-        "username": f"{first.lower()[0]}{last.lower()}_{random.randint(10, 99)}",
-        "age": age,
-        "login_timestamp": login_time,
-        "logout_timestamp": logout_time,
-        "hours_logged_in": hours_logged_in,
-        "created_at": now  # When this record was actually sent to the DB
-    }
+        for j in range(num_sessions):
+            # Session duration between 0.1 and 15 hours
+            duration = round(random.uniform(0.1, 15.0), 2)
+
+            # Login must be after account creation
+            login_delta = random.randint(
+                0, int((now - created_at).total_seconds()))
+            login_time = created_at + timedelta(seconds=login_delta)
+            logout_time = login_time + timedelta(hours=duration)
+
+            activities.append({
+                f"activity{j}": {
+                    "login": login_time,
+                    "logout": logout_time,
+                    "duration": duration
+                }
+            })
+            total_time += duration
+
+        users.append({
+            "user_id": f"user_{1000 + i}",
+            "age": age,
+            "location": location,
+            "device": device,
+            "date_created": created_at,
+            "total_activity": round(total_time, 2),
+            "activities": activities
+        })
+
+    return users
