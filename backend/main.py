@@ -1,12 +1,14 @@
+import os
+import random
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
+from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
-from typing import Optional
-from datetime import datetime, timedelta
-import random
 
-app = FastAPI(title="Analytics Engine API")
+app = FastAPI(title="Sentiment Analytics API")
 
+# Allow Next.js frontend to communicate
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,170 +17,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------
+# DATABASE CONFIGURATION
+# ---------------------------------------------------------
+# 🛠️ Change this URI later when moving to cloud (e.g., MongoDB Atlas)
 MONGO_URL = "mongodb://localhost:27017"
+
+# Connect to the local MongoDB instance
 client = AsyncIOMotorClient(MONGO_URL)
-db = client.analytics_db
-collection = db.users
+db = client.sentiment_db       # Database name
+collection = db.comments       # Collection name
+
+# ---------------------------------------------------------
+# API ENDPOINTS
+# ---------------------------------------------------------
 
 
-# ==========================================
-# 1. THE DATA SEEDER
-# ==========================================
-@app.get("/api/seed")
-async def seed_database():
-    await collection.delete_many({})
+@app.get("/api/posts")
+async def get_posts():
+    """Returns a list of unique post IDs."""
+    # Using MongoDB's distinct function is blazing fast for large datasets
+    post_ids = await collection.distinct("post_id")
+    # Filter out any null or empty values just in case
+    clean_ids = [pid for pid in post_ids if pid]
+    return {"post_ids": clean_ids}
 
-    users = []
-    start_date = datetime(2022, 1, 1)
 
-    for i in range(250):
-        days_offset = random.randint(0, 4 * 365)
-        date_created = start_date + timedelta(days=days_offset)
+@app.get("/api/platforms")
+async def get_platforms(post_id: str):
+    """Returns available platforms for a specific post."""
+    # Find all distinct platforms specifically for this post_id
+    platforms = await collection.distinct("platform", {"post_id": post_id})
+    return {"platforms": platforms}
 
-        activities = []
-        for _ in range(random.randint(10, 50)):
-            session_offset = random.randint(
-                0, (datetime.now() - date_created).days)
-            session_date = date_created + \
-                timedelta(days=session_offset, hours=random.randint(0, 23))
 
-            activities.append({
-                f"session_{random.randint(1000, 9999)}": {
-                    "login": session_date.isoformat(),
-                    "duration": round(random.uniform(0.1, 4.0), 1)
-                }
-            })
+@app.get("/api/analytics")
+async def get_analytics(
+    post_id: str,
+    platform: List[str] = Query(...)
+):
+    """Fetches and mathematically aggregates sentiment data for the frontend."""
 
-        users.append({
-            "name": f"User_{i}",
-            "age": random.randint(16, 75),
-            "date_created": date_created.isoformat(),
-            "activities": activities,
-            "total_activity": round(sum([list(a.values())[0]["duration"] for a in activities]), 1)
+    # 1. Query only the exact comments we need, sorted by time directly in the DB
+    cursor = collection.find({
+        "post_id": post_id,
+        "platform": {"$in": platform}
+    }).sort("published_at", 1)  # 1 means ascending (oldest to newest)
+
+    comments = await cursor.to_list(length=None)  # Fetch all matches
+
+    # --- 1. AGGREGATE SENTIMENT (For Bar, Pie, Funnel, Column) ---
+    sentiment_types = ["Positive", "Neutral", "Negative"]
+    aggregate_sentiment = []
+
+    for sent in sentiment_types:
+        entry = {"sentiment": sent, "count": 0}
+        for p in platform:
+            # Count comments for this specific platform and sentiment
+            p_count = len([c for c in comments if c.get(
+                "sentiment") == sent and c.get("platform") == p])
+            entry[p] = p_count
+            entry["count"] += p_count
+        aggregate_sentiment.append(entry)
+
+    # --- 2. TIME SERIES CUMULATIVE MATH (For Live Line Chart) ---
+    time_series = []
+    running_scores = {p: 0 for p in platform}
+
+    for comment in comments:
+        p = comment.get("platform")
+        sent = comment.get("sentiment")
+
+        if sent == "Positive":
+            running_scores[p] += 1
+        elif sent == "Negative":
+            running_scores[p] -= 1
+
+        point = {"time": comment.get("published_at")}
+        for plat in platform:
+            point[plat] = running_scores[plat]
+
+        time_series.append(point)
+
+    # --- 3. SCATTER PLOT DENSITY (For Scatter Chart) ---
+    scatter_plot = []
+    for idx, comment in enumerate(comments):
+        scatter_plot.append({
+            "time": comment.get("published_at"),
+            "value": platform.index(comment.get("platform")) + 1,
+            "platform": comment.get("platform"),
+            # Replace with real likes/replies if your DB has them
+            "volume": random.randint(50, 200)
         })
 
-    await collection.insert_many(users)
-    return {"status": "success", "message": "Inserted 250 users into MongoDB."}
-
-
-# ==========================================
-# 2. RAW HISTORY ENDPOINT
-# ==========================================
-@app.get("/api/history")
-async def get_historical_data(
-    start: Optional[str] = Query(None),
-    end: Optional[str] = Query(None)
-):
-    query = {}
-    if start or end:
-        query["date_created"] = {}
-        if start:
-            query["date_created"]["$gte"] = start
-        if end:
-            query["date_created"]["$lte"] = end
-
-    cursor = collection.find(query).sort("date_created", 1)
-    documents = await cursor.to_list(length=None)
-
-    for doc in documents:
-        doc["_id"] = str(doc["_id"])
-
-    return documents
-
-
-# ==========================================
-# 3. LIVE AGGREGATION ENGINE (Fixed Math)
-# ==========================================
-@app.get("/api/analytics/live")
-async def get_live_analytics(
-    metric: str = Query("total_activity"),
-    interval: str = Query("month"),
-    start: Optional[str] = None,
-    end: Optional[str] = None
-):
-    cursor = collection.find({})
-    users = await cursor.to_list(length=None)
-
-    # Step 1: Extract every session tagged with User ID
-    all_sessions = []
-    for user in users:
-        uid = str(user.get("_id", ""))
-        age = user.get("age", 0)
-        activities = user.get("activities", [])
-
-        for act_wrapper in activities:
-            for key, session in act_wrapper.items():
-                if isinstance(session, dict) and "login" in session:
-                    try:
-                        login_str = session["login"]
-                        if login_str.endswith('Z'):
-                            login_str = login_str[:-1] + '+00:00'
-                        dt = datetime.fromisoformat(
-                            login_str).replace(tzinfo=None)
-
-                        all_sessions.append({
-                            "user_id": uid,
-                            "timestamp": dt,
-                            "duration": session.get("duration", 0),
-                            "age": age
-                        })
-                    except Exception:
-                        continue
-
-    # Step 2: Filter by Range
-    if start:
-        start_dt = datetime.fromisoformat(start).replace(tzinfo=None)
-        all_sessions = [s for s in all_sessions if s["timestamp"] >= start_dt]
-    if end:
-        end_dt = datetime.fromisoformat(end).replace(tzinfo=None)
-        all_sessions = [s for s in all_sessions if s["timestamp"] <= end_dt]
-
-    # Step 3: Math Helper - True DAILY averages per unique user
-    def calculate_average(bucket):
-        if not bucket:
-            return 0.0
-
-        if metric == "age":
-            unique_users = {s["user_id"]: s["age"] for s in bucket}
-            return round(sum(unique_users.values()) / len(unique_users), 1)
-        else:
-            # 🛠️ THE FIX: Group by User AND Exact Date to get Daily Totals
-            daily_totals = {}
-            for s in bucket:
-                date_str = s["timestamp"].date().isoformat()
-                key = f"{s['user_id']}_{date_str}"
-                daily_totals[key] = daily_totals.get(key, 0) + s["duration"]
-
-            # 🛠️ Average those daily totals. (Capped at 24 just in case seed data overlaps)
-            valid_totals = [min(24.0, val) for val in daily_totals.values()]
-            return round(sum(valid_totals) / len(valid_totals), 1)
-
-    final_data = []
-
-    # Step 4: Group into specific Time Intervals
-    if interval == "year":
-        for y in ["2022", "2023", "2024", "2025", "2026"]:
-            bucket = [s for s in all_sessions if str(s["timestamp"].year) == y]
-            final_data.append({"time": y, "value": calculate_average(bucket)})
-
-    elif interval == "month":
-        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        for idx, m in enumerate(months):
-            bucket = [s for s in all_sessions if s["timestamp"].month == idx + 1]
-            final_data.append({"time": m, "value": calculate_average(bucket)})
-
-    elif interval == "day":
-        for i in range(1, 32):
-            bucket = [s for s in all_sessions if s["timestamp"].day == i]
-            final_data.append(
-                {"time": str(i), "value": calculate_average(bucket)})
-
-    elif interval == "hour":
-        for i in range(24):
-            label = f"{12 if i == 0 else (i if i <= 12 else i - 12)} {'AM' if i < 12 else 'PM'}"
-            bucket = [s for s in all_sessions if s["timestamp"].hour == i]
-            final_data.append(
-                {"time": label, "value": calculate_average(bucket)})
-
-    return final_data
+    return {
+        "aggregate_sentiment": aggregate_sentiment,
+        "time_series": time_series,
+        "scatter_plot": scatter_plot
+    }
