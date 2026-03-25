@@ -84,6 +84,13 @@ async def get_analytics(
     time_series = []
     running_scores = {p: 0 for p in platform}
 
+    # 🛠️ FIX: Inject a starting baseline so Recharts can draw lines for single-comment posts
+    if comments:
+        initial_point = {"time": "Start"}
+        for plat in platform:
+            initial_point[plat] = 0
+        time_series.append(initial_point)
+
     for comment in comments:
         p = comment.get("platform")
         sent = comment.get("sentiment")
